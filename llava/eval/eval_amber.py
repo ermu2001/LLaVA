@@ -8,6 +8,10 @@ import argparse
 nlp = spacy.load("en_core_web_lg")
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import nltk
+nltk.download('wordnet')
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
 
 def get_args():
     parser = argparse.ArgumentParser()

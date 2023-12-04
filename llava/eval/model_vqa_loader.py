@@ -76,7 +76,7 @@ def eval_model(args):
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
-    questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
+    questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")][:100]
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
