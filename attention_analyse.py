@@ -2,6 +2,9 @@
 import os
 from typing import Union, List
 
+from matplotlib import colormaps
+from matplotlib import pyplot as plt
+
 import PIL.Image
 from PIL import Image
 import PIL.ImageOps
@@ -83,7 +86,14 @@ def make_image_grid(images: List[PIL.Image.Image], cols: int=10,rows: int=None, 
 def transpose_list(l):
     return list(map(list, zip(*l)))
 
-def visualize_spatial_energy(energy, min_, max_, shape=None):
+def convert_pilgray2pyplotpil(img_pil):
+    cm = plt.get_cmap('viridis')
+    img_np = np.array(img_pil)
+    img_np = cm(img_np)
+    img_pil = Image.fromarray((img_np[:, :, :3] * 255).astype(np.uint8), 'RGB')
+    return img_pil
+    
+def visualize_spatial_energy(energy, shape=None):
     b, seq_len = energy.shape
     if shape is None:
         l = math.isqrt(seq_len)
@@ -92,29 +102,32 @@ def visualize_spatial_energy(energy, min_, max_, shape=None):
     if math.prod(shape) != seq_len:
         raise ValueError('')
 
-    energy = (energy - min_) * 255 / (max_ - min_)
-    energy = energy.clip(0, 255)
     energy = energy.reshape(b, *shape)
-    # energy = energy.expand(2, -1, -1).unsqueeze(1)
-    # print(energy.shape)
-    
-    energy_map_pils = [to_pil_image(e) for e in energy]
-    
-    return energy_map_pils
-
-def visualize_1d_energy(energy, min_, max_):
-
-    b, seq_len = energy.shape
+    # def to_pil_image(img):
+    #     # basically this is what the to_pil_image in torch looks like for a 1 channel image
+    #     # print(img.shape)
+    #     # print(type(img))
+    #     # print(img.dtype)
+    #     # print(img)
+    #     # min_, max_ = img.min(), img.max()
+    #     # img = (img - min_) / (min_ - max_)
+    #     if img.ndimension()==2:
+    #         img = img.unsqueeze(0)
+    #     img = img.mul(255).byte()
+    #     img = np.transpose(img.cpu().numpy(), (1, 2, 0))
+    #     img = img[..., 0]
+    #     img = Image.fromarray(img, mode='L')
+    #     return img
         
-    energy = (energy - min_) * 255 / (max_ - min_)
-    energy = energy.clip(0, 255)
-    energy = energy.reshape(b, 1, seq_len)
-    
-    energy_map_pils = [to_pil_image(e) for e in energy]
-    
+    energy_map_pils = [convert_pilgray2pyplotpil(to_pil_image(e.clip(0, 1))) for e in energy]    
     return energy_map_pils
 
 
+def visualize_1d_energy(energy):
+    b, seq_len = energy.shape
+    energy = energy.reshape(b, 1, seq_len)
+    energy_map_pils = [convert_pilgray2pyplotpil(to_pil_image(e.clip(0, 1))) for e in energy]   
+    return energy_map_pils
 class Analyser():
     is_multimodal=True
     def __init__(self, args):
