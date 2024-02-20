@@ -23,12 +23,12 @@ import transformers
 from dataclasses import dataclass
 
 from llava.model.builder import load_pretrained_model
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.mm_utils import process_images, load_image_from_base64, tokenizer_image_token, KeywordsStoppingCriteria
+from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava import conversation as conversation_lib
 
 
-
-
+device='cuda:0'
 
 def load_image(image: Union[str, PIL.Image.Image]) -> PIL.Image.Image:
     """
@@ -128,6 +128,11 @@ def visualize_1d_energy(energy):
     energy = energy.reshape(b, 1, seq_len)
     energy_map_pils = [convert_pilgray2pyplotpil(to_pil_image(e.clip(0, 1))) for e in energy]   
     return energy_map_pils
+
+
+
+
+    
 class Analyser():
     is_multimodal=True
     def __init__(self, args):
@@ -172,18 +177,31 @@ class Analyser():
         # print(energy_transforme_matrix.shape)
         # return
         energies = []
-        energy = start_energy
+        energy = start_energy.to(dtype=torch.float32)
         for layer_attention in attentions:
+            layer_attention = layer_attention.to(dtype=energy.dtype)
             layer_attention = layer_attention.mean(1) # mean over multi heads
+            
             if layer_attention.shape[1] != from_seq_len:
                 raise ValueError('')
             
             # print(layer_attention.shape)
             # print(layer_attention.sum(2)) # all one
             # print(energy.shape)
-            # print(energy.sum(1))
             energy = energy @ layer_attention
             energies.append(energy)
+            energy[:, :, 0] = 0
+            energy = energy / energy.sum(2) 
+            # mean, std = energy.mean(2, keepdim=True), energy.std(2, keepdim=True)
+            # min_, max_ = mean-3*std, mean+3*std
+            # print(min_, max_)
+            # energy = energy.clip(min_, max_)
+            # print(energy)
+            # energy = torch.softmax(energy , dim=2) # soft arg max
+            # print(energy)
+            # energy = (energy - energy.mean(1)) / energy.std() + energy.mean(1)
+            # print(energy.shape)
+            # print('sum to 1:', energy.sum(2))
         return energies
 
     @torch.inference_mode()
@@ -215,8 +233,9 @@ class Analyser():
         conv = conversation_lib.conv_llava_v1.copy()
         user_input, assistant_output, target_text = query
         conv.append_message(conv.roles[0], (user_input, images[0]))
-        # conv.append_message(conv.roles[1], assistant_output)
+        conv.append_message(conv.roles[1], assistant_output)
         prompt = conv.get_prompt()
+        print('prompting with:', prompt)
         ori_prompt = prompt
         num_image_tokens = 0
         if images is not None and len(images) > 0 and self.is_multimodal:
@@ -275,21 +294,24 @@ class Analyser():
         batch_token_index, vis_token_index = torch.where(input_ids == IMAGE_TOKEN_INDEX)
         vis_token_index = vis_token_index
         assert torch.all(batch_token_index == torch.arange(b)), 'only support each instance containing one image '
-        print(vis_token_index)
+        print('vision input start location', vis_token_index)
         # under a batch style
         input_ids_unsqueezed = input_ids.unsqueeze(2)
         response_token_ids_unsqueezed = response_token_ids.unsqueeze(1)
         batch_indexs, token_indexs = torch.any(input_ids_unsqueezed == response_token_ids_unsqueezed, dim=2).nonzero(as_tuple=True)
+        token_indexs = token_indexs - 1 # what causes the model to generate the response tokens?
         token_indexs = torch.where(token_indexs > vis_token_index, token_indexs + num_vis_tokens - 1, token_indexs)
         from_indexs = (batch_indexs, token_indexs)
     
-        to_indexs_vis = (torch.repeat_interleave(batch_token_index, num_vis_tokens), torch.arange(num_vis_tokens).unsqueeze(0).add(vis_token_index.repeat_interleave(b)).mT.flatten())
+        to_indexs_vis = (
+            torch.repeat_interleave(batch_token_index, num_vis_tokens), 
+            torch.arange(num_vis_tokens).unsqueeze(0).add(vis_token_index.repeat_interleave(b)).mT.flatten()
+        )
         # print( (input_ids == input_ids).nonzero(as_tuple=True))
         # print( (input_ids == input_ids).shape)
         batch_indexs, token_indexs = (input_ids == input_ids).nonzero(as_tuple=True)
         token_indexs = torch.where(token_indexs > vis_token_index, token_indexs + num_vis_tokens - 1, token_indexs)
         to_indexs_text = (batch_indexs, token_indexs)
-        
         return from_indexs, to_indexs_vis, to_indexs_text
 
     # only single round analyse, supports 
@@ -331,7 +353,7 @@ class Analyser():
         start_energy = start_energy / start_energy.sum(2, keepdim=True)
 
         assert deep_layer > shallow_layer or deep_layer + shallow_layer < 0, ''
-        print(f'attention visualizing in layers:deep_layer{deep_layer} - shallow_layer{shallow_layer}')
+        print(f'attention analysing in layers:deep_layer{deep_layer} - shallow_layer{shallow_layer}')
 
         if mode == 'multiple':
             lm_attentions = lm_attentions[deep_layer:shallow_layer:-1]
@@ -340,26 +362,21 @@ class Analyser():
             lm_attentions = [torch.stack(lm_attentions).mean(0)]
             
         energies = self.analyse_attention(start_energy, lm_attentions)
-        layers_instances_vis_pils = []
-        layers_instances_text_pils = []
+        vis_energies, all_energies = [], []
+        # layers_instances_vis_pils = []
+        # layers_instances_text_pils = []
         for i, energy in enumerate(energies):
-            energy = energy[:, 0, :]
+            energy = energy[:, 0, :] # get rid of the vector dim  
             # print("sum to one", energy.sum(1)) # sum to one
-            mean, std = energy.mean(1, keepdim=True), energy.std(1, keepdim=True)
-            min_, max_ = mean-3*std, mean+3*std
+            # mean, std = energy.mean(1, keepdim=True), energy.std(1, keepdim=True)
+            # min_, max_ = mean-3*std, mean+3*std
             # print(min_, max_)
-            num_vis_tok = (to_indexs_vis[0]==0).sum()
-            vis_energy = [energy[i, to_indexs_vis[1][i * num_vis_tok],...] for i in range(b)]
+            # num_vis_tok = (to_indexs_vis[0]==0).sum()
+            # vis_energy = [energy[i, to_indexs_vis[1][i * num_vis_tok],...] for i in range(b)]
             vis_energy = energy[:, to_indexs_vis[1]]
             text_energy = energy
-            layer_vis_pils = visualize_spatial_energy(vis_energy, min_=min_, max_=max_)
-            layer_text_pils = visualize_1d_energy(text_energy, min_=min_, max_=max_)
-            layers_instances_vis_pils.append(layer_vis_pils)
-            layers_instances_text_pils.append(layer_text_pils)
-        
-        instances_layers_vis_pils = transpose_list(layers_instances_vis_pils)
-        instances_layers_text_pils = transpose_list(layers_instances_text_pils)
-        
-        display(make_image_grid(instances_layers_vis_pils[0], resize=128))
-        display(make_image_grid( instances_layers_text_pils[0], cols=1, resize=(2000, 20)))
-        return energies
+
+            vis_energies.append(vis_energy)
+            all_energies.append(text_energy)
+
+        return vis_energies, all_energies
